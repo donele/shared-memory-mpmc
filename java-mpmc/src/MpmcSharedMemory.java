@@ -21,16 +21,18 @@ final class MpmcSharedMemory implements AutoCloseable {
     private static final long MAGIC = 0x4d504d434a323131L; // MPMCJ211
     private static final int VERSION = 1;
 
+    private static final int CACHE_LINE_SIZE = 64;
+
     private static final int HEADER_MAGIC_OFFSET = 0;
     private static final int HEADER_VERSION_OFFSET = 8;
     private static final int HEADER_INITIALIZED_OFFSET = 12;
     private static final int HEADER_LEDGER_SIZE_OFFSET = 16;
     private static final int HEADER_STORAGE_SIZE_OFFSET = 24;
-    private static final int HEADER_PUBLISHED_SEQUENCE_OFFSET = 32;
-    private static final int HEADER_CLAIMED_SEQUENCE_OFFSET = 40;
-    private static final int HEADER_CURRENT_OFFSET_OFFSET = 48;
-    private static final int HEADER_CONSUMERS_OFFSET = 56;
-    private static final int HEADER_SIZE = 64;
+    private static final int HEADER_CONSUMERS_OFFSET = 32;
+    private static final int HEADER_PUBLISHED_SEQUENCE_OFFSET = CACHE_LINE_SIZE;
+    private static final int HEADER_CLAIMED_SEQUENCE_OFFSET = CACHE_LINE_SIZE * 2;
+    private static final int HEADER_CURRENT_OFFSET_OFFSET = CACHE_LINE_SIZE * 3;
+    private static final int HEADER_SIZE = CACHE_LINE_SIZE * 4;
 
     private static final int CONSUMER_SLOT_SIZE = 16;
     private static final int CONSUMER_SEQUENCE_OFFSET = 0;
