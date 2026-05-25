@@ -1,6 +1,6 @@
 # shared-memory-mpmc
 
-This repository contains:
+This repository includes:
 
 - `cpp/`: minimal C++ subset copied from `sgt`
 - `java-jdk/`: plain JDK mmap implementation
@@ -46,7 +46,7 @@ In a third terminal, run the producer:
 ./cpp/build/shm_test_producer /tmp/shared-memory-mpmc-shm
 ```
 
-The consumer prints the produced incremental messages.
+The consumer prints the incremental messages as they arrive.
 
 ### Producer benchmark
 
@@ -64,7 +64,7 @@ Test producer run 5/5: 10000 writes in 2152304 [ns], 215 ns per write
 
 ## Java Versions
 
-This repository includes three Java variants:
+The repository includes three Java variants:
 
 - `java-jdk/`: direct JDK implementation
 - `java-agrona/`: Agrona-based implementation
@@ -104,7 +104,7 @@ In a third terminal, run the producer:
 java -cp java-jdk/build ShmTestProducer /tmp/shared-memory-mpmc-java-shm
 ```
 
-The consumer prints the produced incremental messages.
+The consumer prints the incremental messages as they arrive.
 
 #### Producer benchmark
 
@@ -166,7 +166,7 @@ In a third terminal, run the producer:
 java -cp 'java-agrona/build:java-agrona/lib/*' ShmTestProducer /tmp/shared-memory-mpmc-agrona-shm
 ```
 
-The consumer prints the produced incremental messages.
+The consumer prints the incremental messages as they arrive.
 
 #### Producer benchmark
 
@@ -216,7 +216,7 @@ In a third terminal, run the producer:
 java -cp java-mpmc/build ShmTestProducer /tmp/shared-memory-mpmc-java-mpmc-shm
 ```
 
-The consumer prints the produced incremental messages.
+The consumer prints the incremental messages as they arrive.
 
 #### Producer benchmark
 

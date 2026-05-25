@@ -1,15 +1,15 @@
 # Implementation Detail
 
-This repository has three distinct Java shared-memory implementations, and the biggest practical
-difference between them is not just queue structure. It is also the buffer stack each version uses:
+This repository has three distinct Java shared-memory implementations. One of the biggest
+practical differences between them is the buffer stack each version uses:
 
 - plain JDK `MappedByteBuffer`
 - `MappedByteBuffer` wrapped by Agrona `UnsafeBuffer`
 - `MappedByteBuffer` plus `VarHandle` byte-buffer views
 - short-lived or reusable heap buffers used only for encode/decode helpers
 
-This file describes what each buffer is, how it behaves in this repo, and what that implies for
-performance and semantics.
+This file describes each buffer type, how the repo uses it, and what that means for performance
+and semantics.
 
 ## Buffer Families
 
@@ -63,7 +63,7 @@ What it is:
 - the general JDK buffer abstraction
 - can be heap-backed or direct/off-heap depending on how it is created
 
-In this repo there are two distinct roles:
+In this repo, `ByteBuffer` plays two distinct roles:
 
 1. mapped/off-heap access through `MappedByteBuffer`
 2. temporary heap buffers for encode/decode convenience
@@ -76,7 +76,7 @@ Performance implications:
 - `ByteBuffer.allocate(...)` is heap allocation, so it is fine for helper utilities and bad for a
   producer hot path if done per message
 
-The repo already reflects that tradeoff:
+The current code already reflects that tradeoff:
 
 - the optimized producer paths write fields directly into mapped storage
 - helper methods like `encodeIncremental(...)` and `decodeIncremental(...)` still use heap
@@ -100,13 +100,13 @@ How it is used here:
 - `UnsafeBuffer` wraps that mapping
 - `OneToOneRingBuffer` then uses the `UnsafeBuffer` as its storage and metadata area
 
-Why it is usually faster than plain JDK buffer access:
+Why it often runs faster than plain JDK buffer access:
 
 - Agrona is built specifically for low-latency messaging and off-heap data structures
 - primitive accessors and queue code are heavily optimized
 - the library already encodes memory-ordering rules into its API instead of leaving them implicit
 
-Why it is not automatically the fastest overall path here:
+Why it is not automatically the fastest path in this repo:
 
 - it still sits on top of the same mapped file substrate
 - the ring buffer uses Agrona’s generic record format with headers, alignment, and padding
@@ -137,7 +137,7 @@ Performance implications:
 - the growable design is flexible, but flexibility is not free compared with writing directly into
   the final destination
 
-This is an important distinction:
+The distinction matters:
 
 - reusable staging buffer removes allocation pressure
 - it does not remove the payload copy into the queue
@@ -233,8 +233,8 @@ Weaknesses:
 
 What the buffer choice implies:
 
-- good measurement of "how fast is a hand-rolled mapped-file format in Java"
-- not the best measurement of "how fast is a fully correct Java MPMC publication protocol"
+- good for measuring the cost of a hand-rolled mapped-file format in Java
+- not the best way to measure a fully correct Java MPMC publication protocol
 
 ### Agrona: `java-agrona/src/main/java/AgronaShm.java`
 
@@ -267,7 +267,7 @@ Weaknesses:
 What the buffer choice implies:
 
 - often excellent throughput for SPSC workloads
-- not a fair apples-to-apples concurrency comparison against the custom MPMC path
+- not an apples-to-apples concurrency comparison against the custom MPMC path
 - useful when the priority is robust library behavior rather than exact protocol equivalence
 
 ### Custom MPMC: `java-mpmc/src/MpmcSharedMemory.java`
@@ -302,13 +302,13 @@ Weaknesses:
 
 What the buffer choice implies:
 
-- best representation of "what does a custom Java MPMC mapped-file queue really cost"
+- best representation of the cost of a custom Java MPMC mapped-file queue
 - not necessarily the lowest apparent latency in trivial single-producer tests
-- better semantic fidelity than the other Java variants
+- closer semantic fidelity than the other Java variants
 
 ## Heap Buffers Versus Off-Heap Buffers
 
-A useful mental split is:
+The simplest split is:
 
 - heap buffers are convenient and GC-managed
 - off-heap buffers are closer to the actual shared-memory device
@@ -343,8 +343,8 @@ The repo currently uses two different shared-memory mechanisms:
 - the Java implementations use file-backed `MappedByteBuffer`
 - the C++ implementation uses SysV shared memory via `ftok` / `shmget` / `shmat`
 
-These mechanisms can both expose a shared byte region to multiple processes, but they are not the
-same transport and they are not interchangeable.
+Both mechanisms expose a shared byte region to multiple processes, but they use different
+transports and are not interchangeable.
 
 ### File-backed `mmap`
 
@@ -383,13 +383,13 @@ So the hot path is typically:
 - memory access
 - not a blocking file write syscall per message
 
-That is why file-backed `mmap` can still be fast enough for shared-memory IPC:
+File-backed `mmap` can still work well for shared-memory IPC because:
 
 - writes are usually absorbed in RAM first
 - the OS can batch writeback
 - the steady-state producer path does not need a normal `write(...)` call per message
 
-What makes it slower or more fragile:
+What adds cost or fragility:
 
 - calling `force()` / `msync()` frequently
 - a working set larger than available memory
@@ -427,15 +427,14 @@ Tradeoffs:
 
 ### Why the current C++ and Java implementations do not interoperate
 
-This is the first compatibility blocker, before layout and atomics are even considered.
+This is the first compatibility blocker, before layout and atomics come into play.
 
 The current implementations do different things:
 
 - C++ creates and attaches a SysV shared-memory segment
 - Java creates and maps a file
 
-That means they are not pointing at the same backing object, even if the in-memory layout were
-identical.
+They are not pointing at the same backing object, even if the in-memory layout were identical.
 
 So these pairings work:
 
@@ -446,7 +445,7 @@ But this pairing does not work with the current code:
 
 - C++ manager plus Java publisher
 
-For cross-language interop, both sides must first use the same transport:
+Cross-language interop starts with the same transport on both sides:
 
 - either both use file-backed `mmap`
 - or both use SysV shared memory
@@ -462,7 +461,7 @@ The three Java implementations can end up closer than expected in steady state b
 - repeated runs let the JIT optimize the hot loops
 - all versions avoid per-message allocation on the critical path, or mostly do
 
-So the biggest differences often come from:
+The biggest differences usually come from:
 
 - whether there is an extra payload copy
 - whether the queue protocol adds headers, padding, or scanning
@@ -483,7 +482,7 @@ If the goal is the closest Java semantic match to the custom C++ many-producer d
 
 - use the `VarHandle` MPMC version
 
-The key distinction is that "buffer type" and "queue semantics" are coupled here:
+The key point is that buffer type and queue semantics are coupled here:
 
 - plain JDK buffer access is the simplest
 - Agrona buffer access is the most library-optimized

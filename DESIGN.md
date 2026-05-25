@@ -7,7 +7,7 @@ This repository contains four implementations of the same basic shared-memory pu
 - `java-agrona/`: an Agrona-based off-heap queue
 - `java-mpmc/`: a custom Java off-heap queue designed to follow the C++ structure more closely
 
-The goal of this document is to explain:
+This document explains:
 
 - how each version is laid out
 - how publication and consumption work
@@ -28,14 +28,14 @@ All versions publish the same logical test message:
 
 The benchmark loops publish 10,000 messages per timed run.
 
-That means the producer benchmarks mostly measure:
+The producer benchmarks mainly measure:
 
 - reservation overhead
 - metadata updates
 - payload copy / payload store cost
 - publication ordering cost
 
-They do not measure:
+They do not include:
 
 - network input
 - parsing
@@ -107,10 +107,10 @@ This is a custom serialized publication protocol:
 The current consumer path is not a competing-consumer work queue.
 
 Each consumer starts from the current cursor and independently follows the published stream.
-That makes the design closer to pub-sub over shared memory than to a queue that hands each
+This design behaves more like pub-sub over shared memory than a work queue that hands each
 message to exactly one consumer.
 
-### Why it is fast
+### Performance characteristics
 
 - direct shared-memory layout
 - direct payload `memcpy`
@@ -118,7 +118,7 @@ message to exactly one consumer.
 - one explicit publish point
 - minimal metadata
 
-### Why it is not faster
+Costs on the hot path:
 
 - multi-producer safety requires a CAS
 - publication is globally serialized by sequence
@@ -142,7 +142,7 @@ That comment no longer matches the copied type definitions. With the current `Pr
 - `side`: 1
 - `flag_set`: 4
 
-That matters when comparing write bandwidth against the Java versions, which currently encode
+This matters when comparing write bandwidth against the Java versions, which currently encode
 a `35` byte wire-format message instead of writing the larger C++ struct directly.
 
 ## Java JDK
@@ -163,7 +163,7 @@ The plain JDK version uses a file-backed `MappedByteBuffer` with a manually defi
 3. ledger entries
 4. storage ring
 
-The shape intentionally resembles the C++ version.
+The layout intentionally follows the C++ version.
 
 ### Producer algorithm
 
@@ -183,14 +183,14 @@ The consumer:
 4. copies the payload bytes out
 5. decodes the message
 
-### Why it is fast
+### Performance characteristics
 
 - direct mapped-buffer access
 - small encoded payload (`35` bytes)
 - no generic queue framework
 - no per-message allocation in the optimized producer path
 
-### Why it is not faster
+Limits and tradeoffs:
 
 - it does not use the strongest low-level atomic protocol
 - `MappedByteBuffer` access is still higher-level than raw native pointers
@@ -198,8 +198,7 @@ The consumer:
 
 ### Semantic caveat
 
-This version is the simplest Java baseline, not the strongest concurrency implementation.
-It is useful because it isolates:
+This is the simplest Java baseline in the repo. It isolates:
 
 - the cost of file-backed off-heap access
 - the cost of the manual wire format
@@ -223,8 +222,8 @@ This version uses:
 - `OneToOneRingBuffer`
 - `ExpandableArrayBuffer`
 
-The data is off-heap and file-backed, but the queue protocol is Agrona’s record format, not the
-custom ledger-plus-storage format used in the C++ code.
+The data is off-heap and file-backed, and the queue protocol uses Agrona's record format rather
+than the custom ledger-plus-storage format used in the C++ code.
 
 ### Producer algorithm
 
@@ -246,14 +245,14 @@ The consumer uses `ringBuffer.read(handler, limit)`.
 Agrona scans from the current head, interprets record headers, skips padding records, and invokes
 the message handler for real data.
 
-### Why it is fast
+### Performance characteristics
 
 - optimized off-heap buffer implementation
 - explicit ordered / volatile memory access inside Agrona
 - reusable encoding buffer
 - highly tuned library code
 
-### Why it is not faster
+Costs and limits:
 
 - generic record abstraction adds header / alignment overhead
 - the producer encodes into a buffer and Agrona copies that buffer into the ring
@@ -264,8 +263,8 @@ the message handler for real data.
 
 This version is SPSC in the queue primitive.
 
-That makes it a high-performance off-heap Java queue, but not a many-producer / many-consumer
-match for the C++ design.
+This makes it a high-performance off-heap Java queue, but it does not match the many-producer /
+many-consumer semantics of the C++ design.
 
 ## Java MPMC
 
@@ -278,8 +277,8 @@ match for the C++ design.
 
 ### Design goal
 
-This version exists to mirror the C++ queue structure and protocol more closely than the other
-Java variants.
+This version mirrors the C++ queue structure and protocol more closely than the other Java
+variants.
 
 It is a custom off-heap queue built from:
 
@@ -333,8 +332,7 @@ The producer path intentionally copies the C++ idea:
 7. update the current offset
 8. release-store the published sequence
 
-This version does not wrap Agrona. It uses `VarHandle` to perform the actual off-heap CAS and
-ordered publication.
+This version uses `VarHandle` directly for off-heap CAS and ordered publication.
 
 ### Consumer algorithm
 
@@ -346,19 +344,19 @@ Consumers register for a fixed slot and then:
 4. copy the payload bytes
 5. update their slot with the next sequence
 
-Like the C++ code, this is still effectively a pub-sub stream:
+Like the C++ code, this is still a pub-sub stream:
 
 - every consumer can independently read the stream
 - consumers do not divide the stream among themselves
 
-### Why it is fast
+### Performance characteristics
 
 - direct write into final storage
 - no generic record abstraction
 - encoded payload is only `35` bytes
 - explicit CAS and release publication on off-heap bytes
 
-### Why it is not faster
+Costs on the hot path:
 
 - it still pays a producer CAS, just like C++
 - publication is still serialized by the published sequence
@@ -370,14 +368,14 @@ Like the C++ code, this is still effectively a pub-sub stream:
 The first Java measurements looked much worse because the benchmark included cold-JVM effects.
 After repeated runs, the producer times converged into the same broad range.
 
-That happened because:
+The steady-state numbers converged for a few reasons:
 
 - the workload is extremely small
 - all versions publish a small message into warm shared memory
 - allocation was removed from the Java hot paths
 - steady-state JIT-compiled code is much faster than cold Java startup
 
-The important lesson is:
+The main takeaway:
 
 - cold run latency and steady-state latency are different measurements
 
@@ -390,7 +388,7 @@ It measures:
 - per-message queue overhead
 - payload publication overhead
 
-It does not fully measure:
+It does not capture:
 
 - contention between multiple producers
 - behavior with several attached consumers

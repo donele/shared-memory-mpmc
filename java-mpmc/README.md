@@ -1,6 +1,6 @@
 # java-mpmc
 
-Custom off-heap Java queue that mirrors the C++ queue structure more closely than the JDK and
+Custom off-heap Java queue that follows the C++ queue structure more closely than the JDK and
 Agrona variants.
 
 ## How to build
