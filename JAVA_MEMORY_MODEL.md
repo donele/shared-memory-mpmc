@@ -1,4 +1,4 @@
-# Implementation Detail
+# Java Memory Model
 
 This repository has three distinct Java shared-memory implementations:
 
@@ -9,7 +9,7 @@ This repository has three distinct Java shared-memory implementations:
 All three versions also use short-lived or reusable heap buffers in a few encode/decode helper
 paths.
 
-This section describes each buffer type, how the repo uses it, and what that means for
+This file describes each buffer type, how the repo uses it, and what that means for
 performance and semantics.
 
 ## Buffer Families
