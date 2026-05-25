@@ -9,8 +9,8 @@ This repository has three distinct Java shared-memory implementations:
 All three versions also use short-lived or reusable heap buffers in a few encode/decode helper
 paths.
 
-This file describes each buffer type, how the repo uses it, and what that means for performance
-and semantics.
+This section describes each buffer type, how the repo uses it, and what that means for
+performance and semantics.
 
 ## Buffer Families
 
@@ -203,6 +203,120 @@ Important tradeoff:
 - stronger semantics usually improve correctness first, not raw microbenchmark speed
 - for a trivial single-producer test, the simpler JDK path may appear competitive because it avoids
   some atomic coordination that true MPMC semantics require
+
+## `java-mpmc/src/MpmcSharedMemory.java`
+
+This class is the core of the custom Java MPMC variant. It owns the mapped file, defines the
+shared-memory layout, performs producer reservation and publication, and tracks consumer progress.
+
+### What the class stores
+
+The class keeps:
+
+- the mapped file handle and `MappedByteBuffer`
+- the queue geometry: header, consumer-slot area, ledger area, and storage ring
+- static offsets for every shared field in the header and ledger
+- reusable `VarHandle` accessors for atomic reads and writes on mapped bytes
+
+The layout matches the queue description in `ARCHITECTURE.md`: a header followed by consumer
+slots, ledger entries, and the payload storage ring.
+
+### The `VarHandle` definitions
+
+The class defines:
+
+- `private static final VarHandle LONG_HANDLE = MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);`
+- `private static final VarHandle INT_HANDLE = MethodHandles.byteBufferViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);`
+
+Each part matters:
+
+- `MethodHandles` is the JDK factory class in `java.lang.invoke` that creates low-level runtime
+  handles
+- `VarHandle` is the handle object that knows how to read and write a specific kind of memory
+  location
+- `byteBufferViewVarHandle(...)` creates a handle that treats a `ByteBuffer` as a typed sequence
+  of primitive values
+- `long[].class` and `int[].class` specify the element type of that view
+- `ByteOrder.BIG_ENDIAN` tells the handle how to interpret the bytes in the mapped buffer
+
+The `[]` in `long[].class` is part of the API contract. This factory expects an array class
+because it models the `ByteBuffer` as an indexed view over repeated primitive elements. The code
+is not creating a Java `long[]` object here. It is using the array class token to say "treat this
+buffer as a sequence of `long` values."
+
+The handle names are capitalized because they are `private static final` constants. The code
+creates each handle once and reuses it for the lifetime of the class.
+
+### What a handle means here
+
+A handle is an indirect typed accessor. `LONG_HANDLE` does not store a `long` value and it does
+not point at one fixed location. It stores the logic for accessing `long` fields in a
+`ByteBuffer` when the caller supplies:
+
+- the target buffer
+- the byte offset within that buffer
+- the access mode, such as volatile read, release store, or compare-and-set
+
+That is why helper methods such as `getLongVolatile(buffer, offset)` and
+`setLongRelease(buffer, offset, value)` are small wrappers around the same handle.
+
+### How the access modes map to the protocol
+
+The class uses a small set of access patterns:
+
+- `LONG_HANDLE.compareAndSet(...)` reserves the next claimed producer sequence
+- `LONG_HANDLE.getVolatile(...)` reads shared sequence and offset fields that producers and
+  consumers observe concurrently
+- `INT_HANDLE.getAcquire(...)` reads initialization, version, and ledger-size style fields after
+  the writer has published them
+- `LONG_HANDLE.setRelease(...)` publishes a sequence only after the payload and ledger entry are in
+  place
+- `INT_HANDLE.setRelease(...)` publishes initialization and consumer active-state changes
+
+This is the direct Java equivalent of the queue protocol the class is trying to mirror:
+
+1. claim a sequence with CAS
+2. wait until the prior sequence is published
+3. write ledger metadata
+4. write payload bytes
+5. release-publish the new visible sequence
+
+The plain `buffer.putLong(...)`, `putInt(...)`, and `putShort(...)` helpers are used for ordinary
+writes that happen before the release store. The release operation is the publish point that makes
+those earlier writes visible in the intended order.
+
+### Why `MethodHandles` appears at all
+
+`MethodHandles` is the JDK entry point for creating these low-level access handles. The name is a
+little broader than the specific class use here. It does not mean this code is dealing with Java
+methods directly. In this class, `MethodHandles` is only acting as the factory that creates the
+`VarHandle` instances for byte-buffer-backed integer and long fields.
+
+### Storage and wrap behavior
+
+The class uses the handles for control metadata in the header and consumer slots. Payload bytes are
+written separately:
+
+- `writeShortToStorage(...)` and `writeLongToStorage(...)` write directly into the mapped storage
+  ring
+- if the value fits contiguously before the end of the ring, the code uses `buffer.putShort(...)`
+  or `buffer.putLong(...)`
+- if the value crosses the ring boundary, the code falls back to byte-by-byte writes in big-endian
+  order
+
+The read side uses `buffer.duplicate()` to copy bytes out of the storage ring, handling the
+wrapped case in two chunks when necessary.
+
+### Why this class matters in the repo
+
+`MpmcSharedMemory.java` is where the custom Java implementation stops being a generic mapped-file
+example and becomes a real queue protocol. It is the clearest place in the repo to study:
+
+- how the header fields are laid out
+- how producer claim and publish differ
+- how consumers register and report progress
+- how `VarHandle` access modes replace simpler plain-buffer reads and writes
+- where Java stays close to the C++ design and where it still pays JDK-level access overhead
 
 ## Per-Implementation Comparison
 
