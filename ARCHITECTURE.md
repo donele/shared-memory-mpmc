@@ -1,4 +1,4 @@
-# Design
+# Architecture
 
 This repository contains four implementations of the same basic shared-memory publishing idea:
 

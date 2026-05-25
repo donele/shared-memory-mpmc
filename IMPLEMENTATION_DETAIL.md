@@ -1,12 +1,13 @@
 # Implementation Detail
 
-This repository has three distinct Java shared-memory implementations. One of the biggest
-practical differences between them is the buffer stack each version uses:
+This repository has three distinct Java shared-memory implementations:
 
-- plain JDK `MappedByteBuffer`
-- `MappedByteBuffer` wrapped by Agrona `UnsafeBuffer`
-- `MappedByteBuffer` plus `VarHandle` byte-buffer views
-- short-lived or reusable heap buffers used only for encode/decode helpers
+- `java-jdk/`: plain JDK `MappedByteBuffer`
+- `java-agrona/`: `MappedByteBuffer` wrapped by Agrona `UnsafeBuffer`
+- `java-mpmc/`: `MappedByteBuffer` plus `VarHandle` byte-buffer views
+
+All three versions also use short-lived or reusable heap buffers in a few encode/decode helper
+paths.
 
 This file describes each buffer type, how the repo uses it, and what that means for performance
 and semantics.
