@@ -62,7 +62,10 @@ Ways to reduce that overhead:
 Operational implications:
 
 - startup can be slow when a large file is zero-filled eagerly
-- `force()` pushes dirty pages toward the backing file and is not something to do on the hot path
+- `force()` asks the OS to flush modified mapped pages toward the backing file
+- it helps with file durability after initialization or before shutdown, but it is not the
+  per-message publication mechanism that makes queue updates visible to other processes
+- it can trigger expensive OS work, so it should stay off the hot path
 - lifetime is tied to both the file descriptor and the mapping; Java does not make explicit unmap
   especially ergonomic
 
@@ -726,6 +729,28 @@ What adds cost or fragility:
 In practice, low-latency systems often avoid the "real disk" concern by mapping memory-backed
 filesystems such as `/dev/shm` or by using a true shared-memory API instead of ordinary files.
 
+### Does mapping a fixed size guarantee that much RAM?
+
+No.
+
+What the mapping size guarantees:
+
+- the backing object has that size
+- the process gets a virtual address range for that size
+- accesses go through the mapped region
+
+What it does not guarantee:
+
+- that every page stays resident in physical RAM
+- that the OS reserves that amount of RAM exclusively for this mapping
+- that the mapping will never incur page faults, reclaim, or writeback
+
+So a file-backed mapping can still slow down under system memory pressure. Clean pages can be
+evicted and faulted back in later. Dirty pages can be written back to the file. Even if the hot
+path only performs memory loads and stores, the operating system still controls page residency.
+
+That is why "the mapping is 1 GB" is not the same as "1 GB is pinned in RAM for this queue."
+
 ### SysV shared memory
 
 Mental model:
@@ -751,6 +776,116 @@ Tradeoffs:
 - less convenient from Java without native bindings
 - operational cleanup is done through IPC APIs rather than ordinary file lifecycle
 - harder to inspect using normal filesystem tools
+
+### How viable is SysV shared memory from Java?
+
+Viable, but not as a clean pure-JDK solution.
+
+What is easy in Java:
+
+- file-backed shared memory through `MappedByteBuffer`
+
+What is not provided directly by the standard JDK:
+
+- `shmget`
+- `shmat`
+- `shmctl`
+
+So a Java SysV shared-memory implementation normally needs native interop such as:
+
+- JNI
+- JNA
+- the Foreign Function and Memory API on newer JDKs
+
+That makes a Java SysV design possible, but the engineering cost is higher than the current
+`MappedByteBuffer` approach. The work is not only "call `shmget` once." It also includes:
+
+- segment lifecycle and cleanup
+- permissions and key management
+- explicit native memory layout
+- cross-process atomic access semantics
+- failure handling when processes crash or leave orphaned state behind
+- reduced portability compared with a pure-JDK file mapping
+
+So the practical summary is:
+
+- pure Java plus standard JDK APIs strongly favors `MappedByteBuffer`
+- Java plus native interop can use SysV shared memory
+- whether that trade is worth it depends on whether the mapped-file behavior is actually the main
+  latency problem
+
+### Does C++ automatically get stronger residency guarantees?
+
+No. C++ does not get that guarantee just by being native code.
+
+If a C++ implementation uses ordinary `mmap`, it still depends on the same operating-system page
+management rules:
+
+- pages are brought into RAM on demand
+- the OS may reclaim them later
+- dirty file-backed pages may still be written back
+
+C++ makes it easier to reach lower-level controls such as `mlock`, `mlockall`, huge pages, NUMA
+placement, or prefaulting strategies, but those are explicit extra steps rather than automatic
+properties of the language.
+
+### What changes with SysV shared memory and disabled swap?
+
+Using SysV shared memory changes the backing object. It removes the normal file-backed writeback
+path that exists with `mmap` over an ordinary file.
+
+If SysV shared memory is used and swap is disabled:
+
+- the usual mapped-file flush-to-disk concern mostly goes away
+- swap-in and swap-out delays also go away
+
+That is materially better for avoiding file-writeback latency than an ordinary file-backed mapping.
+
+It is still not a hard guarantee of stable latency, because the process can still see:
+
+- first-touch page faults if pages were not prefaulted
+- reclaim pressure elsewhere in the system
+- CPU scheduling noise
+- NUMA effects
+- cache and TLB misses
+
+So the narrow statement is:
+
+- SysV shared memory plus disabled swap greatly reduces the specific "flush dirty pages to disk"
+  concern
+- it does not guarantee that the region stays resident in RAM forever
+- it does not make latency immune to general system memory pressure
+
+### `MappedByteBuffer` versus SysV shared memory in a low-latency Java design
+
+For a low-latency Java system, this choice is mostly about operating-system behavior and
+integration cost rather than one mechanism being "real memory" and the other not.
+
+`MappedByteBuffer` is attractive when:
+
+- pure Java matters
+- the standard JDK API surface matters
+- operational simplicity and debuggability matter
+- a known filesystem path is a convenient rendezvous point between processes
+
+SysV shared memory is attractive when:
+
+- avoiding ordinary file-backed writeback concerns matters
+- a more explicit shared-RAM IPC primitive is preferred
+- native interop is acceptable
+- the team is willing to own platform-specific lifecycle and observability work
+
+In many low-latency Java systems, this transport choice is not the first optimization to pursue.
+The bigger wins are usually:
+
+- no per-message allocation on the hot path
+- no copy-out before decode
+- preallocated or reusable buffers
+- simple thread handoff patterns such as single-writer queues where possible
+- isolating risk, logging, and persistence from the critical path
+
+That is why file-backed mapping can still be a reasonable low-latency Java choice even when a
+native shared-memory primitive is technically "closer to the metal."
 
 ### Why the current C++ and Java implementations do not interoperate
 
