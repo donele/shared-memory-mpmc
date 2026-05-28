@@ -223,6 +223,120 @@ Important tradeoff:
 - for a trivial single-producer test, the simpler JDK path may appear competitive because it avoids
   some atomic coordination that true MPMC semantics require
 
+## `java-jdk/src/SharedMemory.java`
+
+This class is the plain JDK shared-memory variant. It owns the mapped file, defines the queue
+layout, writes payload bytes through ordinary `MappedByteBuffer` operations, and uses a simpler
+publication protocol than the custom MPMC version.
+
+### What the class stores
+
+The class keeps:
+
+- the file path, `FileChannel`, and `MappedByteBuffer`
+- queue geometry such as header size, ledger size, storage size, and consumer count
+- static offsets for the shared header and ledger fields
+
+The layout is still a real queue layout rather than a generic byte blob. The difference from
+`java-mpmc` is that the synchronization model is much simpler and stays within ordinary buffer
+operations.
+
+### How the hot path works
+
+The producer path has two styles:
+
+- `produceIncremental(...)` writes the incremental message field by field directly into mapped
+  storage
+- `produce(byte[] data)` writes an already encoded payload through `writeStorage(...)`
+
+The consumer path:
+
+1. reads the relevant ledger metadata
+2. copies payload bytes out of the mapped ring with `readStorage(...)`
+3. decodes from the copied array
+
+So the plain JDK class already writes directly into final shared storage for the specialized
+incremental path, but it still performs copy-out before decode on the read side.
+
+### Why this class matters in the repo
+
+`SharedMemory.java` is the baseline Java implementation. It is the clearest place to see:
+
+- what the queue looks like without Agrona
+- what the queue looks like without explicit `VarHandle` choreography
+- how much of the design can be expressed with straightforward `MappedByteBuffer` reads and writes
+
+That simplicity is valuable for understanding the data layout, but it also means the concurrency
+story is less explicit than in `java-mpmc`.
+
+### Where the main costs still are
+
+The main remaining costs in this class are:
+
+- field-by-field writes in `produceIncremental(...)` rather than one bulk copy
+- `readStorage(...)` allocating a fresh `byte[]` per consumed payload
+- `ByteBuffer.wrap(...)` in helper decode paths
+- `buffer.duplicate()` helper views for wrapped bulk reads and writes
+
+So this variant is simple and direct on the write side, but it is not allocation-free or zero-copy
+end to end.
+
+## `java-agrona/src/main/java/AgronaShm.java`
+
+This class is the Agrona-backed shared-memory variant. It still maps a file, but it hands most of
+the queue mechanics to Agrona buffer and ring-buffer types instead of implementing the queue
+protocol manually in this repository.
+
+### What the class stores
+
+The class keeps:
+
+- the file path, `FileChannel`, and `MappedByteBuffer`
+- an Agrona `UnsafeBuffer` wrapping the mapped region
+- an Agrona `OneToOneRingBuffer` built on top of that buffer
+
+So the underlying storage is still the same kind of mapped off-heap memory, but the queue API and
+memory-ordering rules are largely embodied by Agrona rather than handwritten `VarHandle` logic.
+
+### How the hot path works
+
+The producer path:
+
+1. encodes the message into a reusable `ExpandableArrayBuffer`
+2. calls `ringBuffer.write(...)` with that buffer, offset, and length
+3. lets Agrona copy the encoded payload into the ring and publish it using its own record protocol
+
+The consumer path:
+
+1. receives an Agrona `DirectBuffer` view and index from the ring-buffer callback flow
+2. decodes fields directly from that buffer view
+
+So the Agrona variant pays an extra staging-and-copy step on write, but it avoids the JDK and
+custom-MPMC style of copying payload bytes out into a fresh `byte[]` before decode.
+
+### Why this class matters in the repo
+
+`AgronaShm.java` is the clearest place to study the "library-backed low-latency Java" approach in
+this repository. It shows:
+
+- how a mature low-latency library packages buffer access and queue protocol together
+- how reuse-oriented encode buffers reduce allocation pressure
+- how a direct-buffer consumer API makes in-place decode practical
+
+It is less useful than `java-mpmc` for studying the explicit queue protocol itself, because much of
+that behavior is intentionally delegated to Agrona.
+
+### Where the main costs still are
+
+The main remaining costs in this class are:
+
+- field-by-field encoding into the staging buffer
+- the extra copy from staging buffer into the ring
+- normal Java object allocation for decoded message instances if they are materialized
+
+So this variant removes the main per-message heap helper buffers from decode, but it is still not a
+single-copy or object-free path.
+
 ## `java-mpmc/src/MpmcSharedMemory.java`
 
 This class is the core of the custom Java MPMC variant. It owns the mapped file, defines the
