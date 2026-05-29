@@ -507,8 +507,87 @@ It does not use:
 - Agrona `DirectBuffer` or `MutableDirectBuffer`
 - Agrona `OneToOneRingBuffer`
 
-That is why Agrona's in-place decode style is not automatically available in `java-mpmc`. The
+That means `java-mpmc` does not inherit Agrona's buffer-oriented consumer API automatically. The
 custom MPMC code now provides its own direct-view consumer API and decode path instead.
+
+In performance terms, that narrows the decode-side gap substantially:
+
+- Agrona decodes from `DirectBuffer` plus index
+- `java-mpmc` now decodes from `ByteBuffer` plus resolved offset
+
+Both approaches avoid the older copy-out-to-`byte[]` step. The remaining differences are smaller
+than before and mostly come from the accessor layer and the surrounding queue mechanics rather than
+from decode structure alone.
+
+### Hypothetical `java-agrona-mpmc`
+
+There are two very different ways a hypothetical Agrona-backed MPMC variant could be built.
+
+#### Agrona as a buffer wrapper only
+
+One option would be to keep the current custom queue protocol and replace only the buffer-access
+layer with Agrona types such as `UnsafeBuffer` or `AtomicBuffer`.
+
+That would preserve most of the current internals:
+
+- custom header / ledger / storage layout
+- custom claim / publish sequence protocol
+- custom consumer registration and progress tracking
+- custom wrap policy
+
+It could simplify some implementation details:
+
+- buffer access helpers
+- direct-view decode API shape
+- some atomic or ordered memory operations
+
+But it would not fundamentally change the queue design, and it would not simplify as much as moving
+the queue machinery itself to Agrona.
+
+#### Agrona as the queue machinery
+
+The other option would be to build the queue itself on Agrona queue types or ring-buffer machinery.
+
+That would likely simplify implementation in some ways:
+
+- direct-buffer-oriented APIs would come naturally
+- buffer-plus-offset decode would be the normal model
+- more of the ordering and queue mechanics would be delegated to library code
+
+But it would no longer have the same internals as the current `java-mpmc`.
+
+The current `java-mpmc` internals are specifically:
+
+- its own mapped-file header / ledger / storage structure
+- its own claim / publish sequence protocol
+- its own consumer-slot tracking
+- its own `VarHandle` acquire / release / CAS choreography
+
+If Agrona queue machinery became the real queue, then those internals would no longer be the core
+mechanism. The queue would have Agrona's reservation, publication, layout, padding, and visibility
+rules instead.
+
+#### MPMC versus multi-process
+
+This distinction matters because the current `java-mpmc` is a shared-memory queue across processes,
+not just a multi-thread queue inside one JVM.
+
+Agrona clearly provides:
+
+- lock-less queue implementations
+- off-heap ring / broadcast buffers for IPC-style communication
+
+But those are not automatically the same thing as a built-in multi-process MPMC queue with the same
+semantics as this custom implementation.
+
+So a hypothetical `java-agrona-mpmc` could be:
+
+- MPMC in Agrona's own way if it used Agrona queue machinery
+- multi-process / shared-memory capable if it was built on Agrona off-heap buffers and mapped
+  storage
+
+But combining both while preserving this repo's exact protocol would still require custom design on
+top of Agrona primitives.
 
 ## Per-Implementation Comparison
 
