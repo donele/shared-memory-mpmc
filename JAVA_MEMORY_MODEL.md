@@ -432,13 +432,10 @@ written separately:
 
 - `writeShortToStorage(...)` and `writeLongToStorage(...)` write directly into the mapped storage
   ring
-- if the value fits contiguously before the end of the ring, the code uses `buffer.putShort(...)`
-  or `buffer.putLong(...)`
-- if the value crosses the ring boundary, the code falls back to byte-by-byte writes in big-endian
-  order
-
-The read side uses `buffer.duplicate()` to copy bytes out of the storage ring, handling the
-wrapped case in two chunks when necessary.
+- if the remaining tail space is too small for the next payload, the producer skips that slack and
+  restarts at the beginning of the storage ring
+- that keeps each stored payload contiguous, so both write and read paths can use direct absolute
+  buffer access without a wrapped-message slow path
 
 ### Why this class matters in the repo
 
@@ -455,7 +452,8 @@ example and becomes a real queue protocol. It is the clearest place in the repo 
 
 The current producer path already applies some of the earlier guidance:
 
-- it writes directly into the final mapped storage instead of building a full message object first
+- it writes serialized message fields directly into the final mapped storage instead of first
+  building a separate encoded payload object or buffer and then copying that payload into the queue
 - it keeps a local `offset` and advances it sequentially through the message fields
 - it uses one release-publish step after the payload and ledger writes are done
 - it avoids per-message allocation on the producer side
@@ -464,33 +462,35 @@ The remaining costs are still visible in the code:
 
 - the incremental payload is written field by field with `writeShortToStorage(...)`, several
   `writeLongToStorage(...)` calls, and `writeByteToStorage(...)`
-- `readStorage(...)` allocates a fresh `byte[]` on the consumer side
-- `readStorage(...)` also uses `buffer.duplicate()` views when copying bytes out of the ring
+- the queue may leave tail slack unused when the next payload would otherwise wrap
+- `decodeIncremental(...)` still materializes an `IncrementalMessage` object after reading directly
+  from mapped storage
 
-So the producer path already follows the main direct-write pattern, while the consumer path still
-has copy-out and allocation overhead.
+So the producer path already follows the main direct-write pattern, and the consumer now decodes
+directly from mapped storage without a copy-out step.
 
-### Zero-copy decode and why this class does not use it yet
+### Direct decode from mapped storage
 
-In this file, "zero-copy decode" means exposing a direct view of the mapped storage to the decode
-logic instead of first flattening the payload into a new `byte[]`.
+In this file, direct decode means exposing the mapped storage region itself to the decode logic
+instead of first flattening the payload into a new `byte[]`.
 
-`MpmcSharedMemory.java` does not currently expose that kind of interface. Its consume path:
+`MpmcSharedMemory.java` now exposes that kind of interface. Its consume path:
 
 1. reads the ledger entry
-2. allocates a `byte[]`
-3. copies the payload bytes out of the mapped ring
-4. decodes from the copied array
+2. returns a lightweight wrapper containing the mapped buffer, resolved payload offset, and size
+3. decodes directly from that mapped region
 
-This is a design choice in the current code, not a JVM limitation. A more direct version could
-expose:
+That keeps the consumer-side hot path more like the C++ direct-view design while still staying
+within ordinary Java buffer APIs.
 
-- a `ByteBuffer` view plus offset and size
-- a custom direct-buffer wrapper
-- or a specialized decode routine that reads from mapped storage directly
+The remaining API tradeoff is that the direct-view wrapper still has to carry:
 
-The wrapped-ring case is one reason the current code is simpler. Copying into a contiguous array
-avoids making every decode path deal with a message that may straddle the end of the ring.
+- the backing buffer
+- the resolved message start offset
+- the payload size
+
+Those details are hidden from callers that immediately decode the message, but they are still part
+of the internal direct-view API.
 
 ### `java-mpmc` is not built on Agrona
 
@@ -508,7 +508,7 @@ It does not use:
 - Agrona `OneToOneRingBuffer`
 
 That is why Agrona's in-place decode style is not automatically available in `java-mpmc`. The
-custom MPMC code would need its own direct-view consumer API or decode path to get the same effect.
+custom MPMC code now provides its own direct-view consumer API and decode path instead.
 
 ## Per-Implementation Comparison
 
@@ -536,7 +536,9 @@ Consumer path:
 
 What that means:
 
-- the producer avoids many small field stores when the object is already laid out in memory
+- the producer copies a prebuilt packed payload object into the queue with one `memcpy(...)`
+- that is more direct than staging through a helper encode buffer, but less direct than the
+  field-by-field final-storage writes used by `java-jdk` and `java-mpmc`
 - the consumer is closer to zero-copy because it returns a pointer into shared memory
 
 ### Plain JDK
@@ -598,27 +600,28 @@ Producer path:
 Consumer path:
 
 - `consumeNext(...)` reads the ledger entry
-- `readStorage(...)` allocates a new `byte[]` and copies payload bytes out of the ring
-- `decodeIncremental(byte[] data)` decodes from that copied array
+- it returns a lightweight wrapper over the mapped buffer plus the resolved payload offset
+- `decodeIncremental(...)` reads fields directly from that mapped region
 
 What that means:
 
 - the producer is more direct than Agrona because it writes into final storage instead of staging
   into an intermediate message buffer first
-- the consumer is less direct than Agrona because it does not decode in place from a direct buffer
-  view
-- the queue protocol is closer to the C++ design, but the decode path is still simpler and more
-  copy-heavy than the Agrona reader
+- the consumer is now also more direct than the plain JDK version because it avoids copy-out before
+  decode
+- the queue protocol is closer to the C++ design, though it still decodes through Java buffer
+  accessors rather than native pointer casts
 
 ### Summary of the main tradeoff
 
 Across these implementations, the producer and consumer choices split roughly like this:
 
 - C++ is the most direct on both write and read paths
-- plain JDK and custom MPMC write directly into final storage for incremental messages, but still
-  copy payloads out before decode
+- plain JDK writes directly into final storage for incremental messages, but still copies payloads
+  out before decode
+- custom MPMC writes directly into final storage and now decodes directly from mapped storage
 - Agrona pays extra work on the write side because it stages and then copies into the ring, but it
-  gets a more direct decode path from its buffer-oriented consumer API
+  also gets a direct buffer-oriented decode path
 
 ### Plain JDK: `java-jdk/src/SharedMemory.java`
 
@@ -711,8 +714,7 @@ Buffer stack:
 
 - `MappedByteBuffer`
 - `VarHandle` byte-buffer views for atomic fields
-- `ByteBuffer.duplicate()` views for wrapped bulk copies
-- heap `ByteBuffer` only in helper decode code
+- lightweight direct-view wrappers carrying buffer plus resolved offset and size
 
 Hot-path behavior:
 
@@ -725,8 +727,11 @@ Hot-path behavior:
 More specifically:
 
 - the producer already avoids per-message allocation and writes straight into mapped storage
+- if the remaining tail space is too small for the payload, the producer skips it and restarts from
+  the beginning so each message stays contiguous
 - the payload is still emitted as several primitive writes rather than one bulk copy
-- the consumer currently copies into `byte[]` before decode, so it is not a zero-copy reader
+- the consumer decodes directly from mapped storage through the direct-view wrapper, so it no longer
+  copies into `byte[]` before decode
 
 Strengths:
 
@@ -747,8 +752,9 @@ What the buffer choice implies:
 - not necessarily the lowest apparent latency in trivial single-producer tests
 - closer semantic fidelity than the other Java variants
 
-That zero-copy limitation is specific to the current custom API. `java-mpmc` is not built on
-Agrona, so Agrona's `DirectBuffer`-based decode path is not automatically available here.
+This direct-view decode path is custom to `java-mpmc`. It is not built on Agrona, so the
+implementation had to define its own buffer-plus-offset wrapper instead of reusing Agrona's
+`DirectBuffer` API.
 
 ## Heap Buffers Versus Off-Heap Buffers
 

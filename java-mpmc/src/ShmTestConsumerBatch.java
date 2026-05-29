@@ -12,7 +12,7 @@ public final class ShmTestConsumerBatch {
             try {
                 while (true) {
                     MpmcSharedMemory.BufferWrapper buf = shm.consumeNext(consumer);
-                    MpmcSharedMemory.IncrementalMessage msg = MpmcSharedMemory.decodeIncremental(buf.data);
+                    MpmcSharedMemory.IncrementalMessage msg = MpmcSharedMemory.decodeIncremental(buf);
                     System.out.println("    [" + msg + "]");
                 }
             } finally {

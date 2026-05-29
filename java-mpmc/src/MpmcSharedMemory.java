@@ -196,16 +196,19 @@ final class MpmcSharedMemory implements AutoCloseable {
         int ledgerOffset = ledgerOffset(ledgerIndex);
         long offset = getLongVolatile(buffer, ledgerOffset + LEDGER_OFFSET_OFFSET);
         int size = getIntAcquire(buffer, ledgerOffset + LEDGER_SIZE_OFFSET);
-        byte[] data = readStorage(offset, size);
 
         consumer.nextSequence = targetSequence + 1L;
         if (consumer.slotIndex >= 0) {
             setLongRelease(buffer, consumerSequenceOffset(consumer.slotIndex), consumer.nextSequence);
         }
-        return new BufferWrapper(data, size);
+        return new BufferWrapper(buffer, storageOffset(offset), size);
     }
 
     private WriteReservation reserveWrite(int size, short topic, short strategyId) {
+        if (size > storageSize) {
+            throw new IllegalArgumentException("Message size " + size + " exceeds storage size " + storageSize);
+        }
+
         long claimedExpected = getLongVolatile(buffer, HEADER_CLAIMED_SEQUENCE_OFFSET);
         long claimedDesired = claimedExpected + 1L;
         while (!(boolean) LONG_HANDLE.compareAndSet(
@@ -223,11 +226,13 @@ final class MpmcSharedMemory implements AutoCloseable {
         }
 
         long currentOffset = getLongVolatile(buffer, HEADER_CURRENT_OFFSET_OFFSET);
-        long remaining = storageSize - ((currentOffset & (storageSize - 1L)) + 1L);
+        int currentIndex = storageIndex(currentOffset);
+        long remaining = storageSize - (currentIndex + 1L);
 
         long offsetStart;
         long offsetEnd;
         if (size > remaining) {
+            // Skip the tail slack and restart at the beginning so each payload stays contiguous.
             offsetStart = currentOffset + remaining + 1L;
             offsetEnd = offsetStart + size - 1L;
         } else {
@@ -263,70 +268,36 @@ final class MpmcSharedMemory implements AutoCloseable {
     }
 
     private void writeShortToStorage(long offset, short value) {
-        int storageIndex = storageIndex(offset);
-        if (storageIndex + 2 <= storageSize) {
-            buffer.putShort((int) (storageStart + storageIndex), value);
-            return;
-        }
-        writeByteToStorage(offset, (byte) ((value >>> 8) & 0xff));
-        writeByteToStorage(offset + 1, (byte) (value & 0xff));
+        buffer.putShort(storageOffset(offset), value);
     }
 
     private void writeLongToStorage(long offset, long value) {
-        int storageIndex = storageIndex(offset);
-        if (storageIndex + 8 <= storageSize) {
-            buffer.putLong((int) (storageStart + storageIndex), value);
-            return;
-        }
-        writeByteToStorage(offset, (byte) ((value >>> 56) & 0xff));
-        writeByteToStorage(offset + 1, (byte) ((value >>> 48) & 0xff));
-        writeByteToStorage(offset + 2, (byte) ((value >>> 40) & 0xff));
-        writeByteToStorage(offset + 3, (byte) ((value >>> 32) & 0xff));
-        writeByteToStorage(offset + 4, (byte) ((value >>> 24) & 0xff));
-        writeByteToStorage(offset + 5, (byte) ((value >>> 16) & 0xff));
-        writeByteToStorage(offset + 6, (byte) ((value >>> 8) & 0xff));
-        writeByteToStorage(offset + 7, (byte) (value & 0xff));
+        buffer.putLong(storageOffset(offset), value);
     }
 
     private void writeByteToStorage(long offset, byte value) {
-        buffer.put((int) (storageStart + storageIndex(offset)), value);
-    }
-
-    private byte[] readStorage(long offsetStart, int size) {
-        int storageIndex = storageIndex(offsetStart);
-        byte[] out = new byte[size];
-        if (storageIndex + size <= storageSize) {
-            ByteBuffer view = buffer.duplicate();
-            view.position((int) (storageStart + storageIndex));
-            view.get(out);
-            return out;
-        }
-
-        int firstChunk = (int) (storageSize - storageIndex);
-        ByteBuffer view = buffer.duplicate();
-        view.position((int) (storageStart + storageIndex));
-        view.get(out, 0, firstChunk);
-        view.position((int) storageStart);
-        view.get(out, firstChunk, size - firstChunk);
-        return out;
+        buffer.put(storageOffset(offset), value);
     }
 
     private int storageIndex(long offset) {
         return (int) (offset & (storageSize - 1L));
     }
 
-    static IncrementalMessage decodeIncremental(byte[] data) {
-        ByteBuffer in = ByteBuffer.wrap(data);
-        short type = in.getShort();
+    private int storageOffset(long offset) {
+        return (int) (storageStart + storageIndex(offset));
+    }
+
+    static IncrementalMessage decodeIncremental(BufferWrapper data) {
+        short type = data.buffer.getShort(data.offset);
         if (type != MSG_INCREMENTAL_L2) {
             throw new IllegalArgumentException("Unexpected msg_type=" + type);
         }
         return new IncrementalMessage(
-                in.getLong(),
-                in.getLong(),
-                in.getLong(),
-                in.getLong(),
-                in.get()
+                data.buffer.getLong(data.offset + 2),
+                data.buffer.getLong(data.offset + 10),
+                data.buffer.getLong(data.offset + 18),
+                data.buffer.getLong(data.offset + 26),
+                data.buffer.get(data.offset + 34)
         );
     }
 
@@ -394,11 +365,13 @@ final class MpmcSharedMemory implements AutoCloseable {
     }
 
     static final class BufferWrapper {
-        final byte[] data;
+        final ByteBuffer buffer;
+        final int offset;
         final int size;
 
-        BufferWrapper(byte[] data, int size) {
-            this.data = data;
+        BufferWrapper(ByteBuffer buffer, int offset, int size) {
+            this.buffer = buffer;
+            this.offset = offset;
             this.size = size;
         }
     }
